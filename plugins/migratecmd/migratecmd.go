@@ -21,8 +21,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/inflector"
 	"github.com/pocketbase/pocketbase/tools/osutils"
@@ -100,13 +102,15 @@ func (p *plugin) createCommand() *cobra.Command {
 - create name   - creates new blank migration template file
 - collections   - creates new migration file with snapshot of the local collections configuration
 - history-sync  - ensures that the _migrations history table doesn't have references to deleted migration files
+- status        - shows the current status (applied/pending) of all migrations
+- fresh         - reverts all applied migrations and re-runs them from scratch
 `
 
 	command := &cobra.Command{
 		Use:          "migrate",
 		Short:        "Executes app DB migration scripts",
 		Long:         cmdDesc,
-		ValidArgs:    []string{"up", "down", "create", "collections"},
+		ValidArgs:    []string{"up", "down", "create", "collections", "history-sync", "status", "fresh"},
 		SilenceUsage: true,
 		RunE: func(command *cobra.Command, args []string) error {
 			cmd := ""
@@ -121,6 +125,14 @@ func (p *plugin) createCommand() *cobra.Command {
 				}
 			case "collections":
 				if _, err := p.migrateCollectionsHandler(args[1:], true); err != nil {
+					return err
+				}
+			case "status":
+				if err := p.migrateStatusHandler(); err != nil {
+					return err
+				}
+			case "fresh":
+				if err := p.migrateFreshHandler(); err != nil {
 					return err
 				}
 			default:
@@ -214,4 +226,81 @@ func (p *plugin) migrateCollectionsHandler(args []string, interactive bool) (str
 	}
 
 	return p.migrateCreateHandler(template, createArgs, interactive)
+}
+
+// migrateStatusHandler prints the current status of all migrations
+// (applied or pending) to stdout.
+func (p *plugin) migrateStatusHandler() error {
+	var list = core.MigrationsList{}
+	list.Copy(core.SystemMigrations)
+	list.Copy(core.AppMigrations)
+
+	runner := core.NewMigrationsRunner(p.app, list)
+
+	statuses, err := runner.Status()
+	if err != nil {
+		return err
+	}
+
+	if len(statuses) == 0 {
+		color.Yellow("No migrations found.")
+		return nil
+	}
+
+	// column widths
+	const statusCol = 9 // "Applied" or "Pending"
+	fmt.Printf("%-*s  %s\n", statusCol, "Status", "Migration")
+	fmt.Printf("%s  %s\n", strings.Repeat("-", statusCol), strings.Repeat("-", 9))
+
+	for _, s := range statuses {
+		if s.Applied {
+			color.Green("%-*s  %s", statusCol, "Applied", s.File)
+		} else {
+			color.Yellow("%-*s  %s", statusCol, "Pending", s.File)
+		}
+	}
+
+	return nil
+}
+
+// migrateFreshHandler reverts all applied migrations and re-applies them.
+func (p *plugin) migrateFreshHandler() error {
+	var list = core.MigrationsList{}
+	list.Copy(core.SystemMigrations)
+	list.Copy(core.AppMigrations)
+
+	runner := core.NewMigrationsRunner(p.app, list)
+
+	confirm := osutils.YesNoPrompt(
+		"Do you really want to revert all applied migrations and re-run them from scratch?",
+		false,
+	)
+	if !confirm {
+		fmt.Println("The command has been cancelled")
+		return nil
+	}
+
+	// revert all applied migrations
+	reverted, err := runner.Down(len(list.Items()))
+	if err != nil {
+		return err
+	}
+	for _, file := range reverted {
+		color.Yellow("Reverted %s", file)
+	}
+
+	// re-apply all migrations
+	applied, err := runner.Up()
+	if err != nil {
+		return err
+	}
+	if len(applied) == 0 {
+		color.Green("No migrations to apply.")
+	} else {
+		for _, file := range applied {
+			color.Green("Applied %s", file)
+		}
+	}
+
+	return nil
 }
