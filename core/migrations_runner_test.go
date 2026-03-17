@@ -199,6 +199,54 @@ func TestMigrationsRunnerRemoveMissingAppliedMigrations(t *testing.T) {
 	}
 }
 
+func TestMigrationsRunnerStatus(t *testing.T) {
+	t.Parallel()
+
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	l := core.MigrationsList{}
+	l.Register(func(app core.App) error { return nil }, nil, "1_test")
+	l.Register(func(app core.App) error { return nil }, nil, "2_test")
+	l.Register(func(app core.App) error { return nil }, nil, "3_test")
+
+	runner := core.NewMigrationsRunner(app, l)
+
+	// simulate only 1_test applied
+	appliedAt := time.Now().UnixMicro()
+	_, err := app.DB().Insert(core.DefaultMigrationsTable, dbx.Params{
+		"file":    "1_test",
+		"applied": appliedAt,
+	}).Execute()
+	if err != nil {
+		t.Fatalf("Failed to insert 1_test migration: %v", err)
+	}
+
+	statuses, err := runner.Status()
+	if err != nil {
+		t.Fatalf("Status() returned error: %v", err)
+	}
+
+	if len(statuses) != 3 {
+		t.Fatalf("Expected 3 statuses, got %d", len(statuses))
+	}
+
+	// 1_test should be applied
+	if statuses[0].File != "1_test" || !statuses[0].Applied || statuses[0].AppliedAt != appliedAt {
+		t.Fatalf("Expected 1_test to be applied with correct timestamp, got %+v", statuses[0])
+	}
+
+	// 2_test and 3_test should be pending
+	for _, s := range statuses[1:] {
+		if s.Applied {
+			t.Fatalf("Expected %s to be pending, got applied", s.File)
+		}
+		if s.AppliedAt != 0 {
+			t.Fatalf("Expected %s AppliedAt to be 0, got %d", s.File, s.AppliedAt)
+		}
+	}
+}
+
 func isMigrationApplied(app core.App, file string) bool {
 	var exists int
 

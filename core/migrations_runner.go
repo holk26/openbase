@@ -11,6 +11,13 @@ import (
 	"github.com/spf13/cast"
 )
 
+// MigrationStatusInfo holds the status of a single migration.
+type MigrationStatusInfo struct {
+	File      string
+	Applied   bool
+	AppliedAt int64 // unix microseconds (0 if not yet applied)
+}
+
 var AppMigrations MigrationsList
 var SystemMigrations MigrationsList
 
@@ -241,6 +248,44 @@ func (r *MigrationsRunner) RemoveMissingAppliedMigrations() error {
 	})).Execute()
 
 	return err
+}
+
+// Status returns the status of all migrations in the runner's migrations list.
+//
+// Applied migrations will have Applied=true and AppliedAt set to the unix
+// microseconds timestamp when they were applied.
+func (r *MigrationsRunner) Status() ([]*MigrationStatusInfo, error) {
+	if err := r.initMigrationsTable(); err != nil {
+		return nil, err
+	}
+
+	type record struct {
+		File    string `db:"file"`
+		Applied int64  `db:"applied"`
+	}
+
+	records := []record{}
+	if err := r.app.DB().Select("file", "applied").From(r.tableName).All(&records); err != nil {
+		return nil, err
+	}
+
+	appliedMap := make(map[string]int64, len(records))
+	for _, rec := range records {
+		appliedMap[rec.File] = rec.Applied
+	}
+
+	items := r.migrationsList.Items()
+	statuses := make([]*MigrationStatusInfo, len(items))
+	for i, m := range items {
+		appliedAt, ok := appliedMap[m.File]
+		statuses[i] = &MigrationStatusInfo{
+			File:      m.File,
+			Applied:   ok,
+			AppliedAt: appliedAt,
+		}
+	}
+
+	return statuses, nil
 }
 
 func (r *MigrationsRunner) initMigrationsTable() error {
